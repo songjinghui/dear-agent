@@ -1,0 +1,1 @@
+"""Personal companion application."""

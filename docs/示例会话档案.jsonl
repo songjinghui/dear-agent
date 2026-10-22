@@ -1,0 +1,5 @@
+{"type":"archive","format":"personal-conversation-archive","version":"1.0","archive_id":"example-001","part_id":"part-001","part_index":1,"part_count":1,"source_platform":"Example"}
+{"type":"conversation","id":"conversation-001","title":"示例会话","created_at":null}
+{"type":"message","id":"message-001","conversation_id":"conversation-001","sequence":1,"timestamp":"2026-01-11T22:51:06+08:00","speaker":"user","speaker_label":null,"content":"请总结这个链接：https://example.com/article"}
+{"type":"message","id":"message-002","conversation_id":"conversation-001","sequence":2,"timestamp":null,"speaker":"assistant","speaker_label":"Example AI","content":"我可以帮你总结；请提供网页正文。"}
+{"type":"summary","id":"summary-001","conversation_id":"conversation-001","content":"用户开始了一段对话。","based_on_message_ids":["message-001","message-002"]}

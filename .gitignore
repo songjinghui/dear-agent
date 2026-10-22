@@ -1,0 +1,18 @@
+# Local runtime state and credentials
+data/
+.env
+.env.*
+!.env.example
+
+# Python environments and build artifacts
+**/.venv/
+**/__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Temporary databases and archives produced by tests
+backend/tests/feature-test-*/
+
+# Frontend dependencies and build output
+frontend/node_modules/
+frontend/dist/
