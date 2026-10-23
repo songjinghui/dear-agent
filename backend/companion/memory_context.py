@@ -92,6 +92,8 @@ def select_memories_for_context(
     ranked.sort(
         key=lambda item: (
             item[0],
+            item[1].get("_bm25_score") is not None,
+            -float(item[1].get("_bm25_score") or 0),
             int(item[1].get("importance", 0) or 0),
             item[1].get("updated_at", ""),
         ),

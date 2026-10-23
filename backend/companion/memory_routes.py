@@ -10,7 +10,7 @@ def search_relevant_memories(query: str, limit: int = 4, *, vector_search: bool 
     with connect() as db:
         try:
             rows = db.execute(
-                "SELECT m.* FROM memories_fts f JOIN memories m ON m.id=f.memory_id "
+                "SELECT m.*,bm25(memories_fts) AS _bm25_score FROM memories_fts f JOIN memories m ON m.id=f.memory_id "
                 "WHERE memories_fts MATCH ? ORDER BY bm25(memories_fts) LIMIT ?",
                 (segmented, limit),
             ).fetchall() if segmented else []
@@ -32,7 +32,8 @@ def search_relevant_memories(query: str, limit: int = 4, *, vector_search: bool 
     except (httpx.HTTPError, ValueError, KeyError, TypeError, json.JSONDecodeError):
         vector = []
     merged = {item["id"]: item for item in lexical}
-    merged.update({item["id"]: item for item in vector})
+    for item in vector:
+        merged[item["id"]] = {**merged.get(item["id"], {}), **item}
     return list(merged.values())
 
 

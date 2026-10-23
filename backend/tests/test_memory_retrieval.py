@@ -75,6 +75,23 @@ class MemoryRetrievalTests(ApiFeatureTestCase):
 
         self.assertEqual([item["id"] for item in selected], ["two-terms"])
 
+    def test_bm25_rank_breaks_ties_in_final_memory_selection(self) -> None:
+        tokens = {
+            "东京旅行计划": ["东京", "旅行", "计划"],
+            "用户讨论东京旅行": ["用户", "讨论", "东京", "旅行"],
+        }
+        candidates = [
+            {"id": "weaker-ft-match", "content": "用户讨论东京旅行", "importance": 3,
+             "updated_at": "2026-10-01", "sensitivity": "normal", "confirmation": "confirmed", "_bm25_score": -0.2},
+            {"id": "stronger-ft-match", "content": "用户讨论东京旅行", "importance": 3,
+             "updated_at": "2026-10-01", "sensitivity": "normal", "confirmation": "confirmed", "_bm25_score": -0.9},
+        ]
+
+        with patch.object(memory_context.jieba, "cut", side_effect=lambda text: tokens.get(text, [])):
+            selected = memory_context.select_memories_for_context("东京旅行计划", candidates)
+
+        self.assertEqual([item["id"] for item in selected], ["stronger-ft-match", "weaker-ft-match"])
+
     def test_single_character_chinese_topic_can_match_a_preference(self) -> None:
         tokens = {"推荐书": ["推荐", "书"], "用户喜欢看书": ["用户", "喜欢", "看", "书"]}
         candidate = {"id": "reading", "content": "用户喜欢看书", "sensitivity": "normal", "confirmation": "confirmed"}

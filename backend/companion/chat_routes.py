@@ -7,7 +7,9 @@ from .context_builder import compose_context
 from .context_runtime import ContextBudgetExceeded, call_with_context_retry, prepare_direct_api_context
 from .context_store import get_session_summary
 from .memory_context import memory_fingerprint, select_memories_for_context
+from .memory_protocol import MEMORY_RESPONSE_INSTRUCTIONS
 from .memory_routes import MemoryInput, create_memory, search_relevant_memories
+from .memory_suggestions import process_agent_response
 from .model_call_logs import (
     current_call_context, finish_model_call, model_call_context, record_model_call,
     update_model_call_request,
@@ -99,8 +101,10 @@ async def stream_cli_chat(
     def save_exact_request(request: dict, model: str | None) -> None:
         update_model_call_request(log_id, request, model)
 
-    async def send_delta(delta: str) -> None:
-        await queue.put({"type": "delta", "content": delta})
+    async def send_delta(_delta: str) -> None:
+        # The provider response is a structured envelope. Buffering prevents its
+        # internal JSON from leaking into the user-visible chat stream.
+        return None
 
     async def run_turn() -> None:
         try:
@@ -129,6 +133,8 @@ async def stream_cli_chat(
                 provider.run_turn(context, send_delta),
                 timeout=180,
             )
+            processed = process_agent_response(answer, content, session_id, user_message["id"])
+            answer = processed["reply"]
             finish_model_call(log_id, status="complete", response_preview=answer[:2000], duration_ms=round((time.perf_counter() - started) * 1000))
             assistant_message = {
                 "id": str(uuid.uuid4()), "session_id": session_id, "role": "assistant",
@@ -141,7 +147,14 @@ async def stream_cli_chat(
                     assistant_message,
                 )
                 index_message(db, assistant_message["id"], assistant_message["content"])
-            await queue.put({"type": "done", "user_message": user_message, "assistant_message": assistant_message})
+            await queue.put({
+                "type": "delta", "content": answer,
+            })
+            await queue.put({
+                "type": "done", "user_message": user_message,
+                "assistant_message": assistant_message,
+                "memory_suggestions": processed["memory_suggestions"],
+            })
         except asyncio.CancelledError:
             finish_model_call(log_id, status="interrupted", error="浏览器连接已结束，本次回复停止生成。", duration_ms=round((time.perf_counter() - started) * 1000))
             raise
@@ -252,6 +265,7 @@ async def chat(payload: ChatInput) -> dict:
         title = content[:28] + ("…" if len(content) > 28 else "") if message_count == 1 else session["title"]
         db.execute("UPDATE sessions SET title=?, updated_at=? WHERE id=?", (title, now(), payload.session_id))
 
+    memory_suggestions = []
     if remembered:
         create_memory(MemoryInput(content=remembered))
         answer = "记下来了。你可以在「记忆」里查看、修改或删除它。"
@@ -292,7 +306,8 @@ async def chat(payload: ChatInput) -> dict:
                 limit=5,
             ))
         base_prompt = (
-            "固定边界：不要把推测当事实，不要假装记得没有提供的信息。尊重用户自主；提供陪伴和思路整理，不替代专业服务。"
+            "固定边界：不要把推测当事实，不要假装记得没有提供的信息。尊重用户自主；提供陪伴和思路整理，不替代专业服务。\n\n"
+            + MEMORY_RESPONSE_INSTRUCTIONS
         )
         if settings["provider"] == "openai-compatible":
             try:
@@ -340,6 +355,9 @@ async def chat(payload: ChatInput) -> dict:
             raise HTTPException(502, f"模型服务返回错误（HTTP {exc.response.status_code}）。请检查服务地址、模型名称和密钥。") from exc
         except (httpx.HTTPError, KeyError, IndexError, TypeError, ValueError) as exc:
             raise HTTPException(502, "无法连接模型服务或响应格式不兼容；请检查模型设置。") from exc
+        processed = process_agent_response(answer, content, payload.session_id, user_message["id"])
+        answer = processed["reply"]
+        memory_suggestions = processed["memory_suggestions"]
 
     assistant_message = {"id": str(uuid.uuid4()), "session_id": payload.session_id, "role": "assistant", "content": answer, "created_at": now(), "origin": session["origin"]}
     with connect() as db:
@@ -350,4 +368,4 @@ async def chat(payload: ChatInput) -> dict:
             assistant_message,
         )
         index_message(db, assistant_message["id"], assistant_message["content"])
-    return {"user_message": user_message, "assistant_message": assistant_message}
+    return {"user_message": user_message, "assistant_message": assistant_message, "memory_suggestions": memory_suggestions}

@@ -15,6 +15,7 @@ from . import (
     session_routes,
     archive_import_routes,
     memory_routes,
+    memory_suggestions,
     archive_read_routes,
     archive_analysis_routes,
     archive_organization_routes,

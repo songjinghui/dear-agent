@@ -7,6 +7,7 @@ export const emptySettings: Settings = {
 };
 
 export const labels = { episodic: "经历", semantic: "偏好", working: "短期" };
+export function formatBytes(bytes: number) { return bytes < 1024 * 1024 ? `${Math.ceil(bytes / 1024)} KB` : `${(bytes / (1024 * 1024)).toFixed(1)} MiB`; }
 export const evidenceLabels: Record<string, string> = {
   explicit_fact: "明确陈述", subjective_experience: "主观感受", preference: "偏好", goal: "目标", inference: "推断",
 };

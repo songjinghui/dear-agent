@@ -171,6 +171,23 @@ def initialize() -> None:
                 content_hash TEXT NOT NULL,
                 vector_json TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS memory_suggestions (
+                id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+                message_id TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+                content TEXT NOT NULL,
+                memory_type TEXT NOT NULL,
+                importance INTEGER NOT NULL DEFAULT 3,
+                sensitivity TEXT NOT NULL DEFAULT 'normal',
+                evidence TEXT NOT NULL,
+                rationale TEXT NOT NULL DEFAULT '',
+                expires_at TEXT,
+                status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','approved','dismissed')),
+                memory_id TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(message_id, content)
+            );
             CREATE TABLE IF NOT EXISTS archive_imports (
                 id TEXT PRIMARY KEY,
                 source_platform TEXT NOT NULL DEFAULT '',
