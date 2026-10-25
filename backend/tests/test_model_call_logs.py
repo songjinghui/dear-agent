@@ -1,12 +1,38 @@
 import asyncio
+from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
 from companion import chat_routes, common
-from companion.model_call_logs import delete_model_call_log, get_model_call_log, list_model_call_logs, record_model_call, finish_model_call
+from companion.model_call_logs import (
+    delete_model_call_log, finish_model_call, get_model_call_log,
+    list_model_call_logs, prune_expired_model_call_logs, record_model_call,
+)
 from tests.support import ApiFeatureTestCase
 
 
 class ModelCallLogFeatureTests(ApiFeatureTestCase):
+    def test_logs_expire_after_thirty_days_without_deleting_newer_records(self) -> None:
+        reference_time = datetime(2026, 10, 25, 15, 0, tzinfo=timezone.utc)
+        expired_id = record_model_call(
+            provider="openai-compatible", model="old-model", purpose="chat", request={},
+        )
+        retained_id = record_model_call(
+            provider="openai-compatible", model="new-model", purpose="chat", request={},
+        )
+        with common.connect() as db:
+            db.execute(
+                "UPDATE model_call_logs SET created_at=? WHERE id=?",
+                ((reference_time - timedelta(days=30, microseconds=1)).isoformat(timespec="microseconds"), expired_id),
+            )
+            db.execute(
+                "UPDATE model_call_logs SET created_at=? WHERE id=?",
+                ((reference_time - timedelta(days=30)).isoformat(timespec="microseconds"), retained_id),
+            )
+
+        self.assertEqual(prune_expired_model_call_logs(reference_time), 1)
+        self.assertEqual(list_model_call_logs()["total"], 1)
+        self.assertEqual(list_model_call_logs()["items"][0]["id"], retained_id)
+
     def test_direct_api_call_is_recorded_with_the_exact_messages(self) -> None:
         class Response:
             def raise_for_status(self) -> None:

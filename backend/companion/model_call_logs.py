@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 from contextlib import contextmanager
 from contextvars import ContextVar
+from datetime import datetime, timedelta, timezone
 import json
 import uuid
 
@@ -13,6 +15,7 @@ from .common import app, connect, now
 
 
 _call_context: ContextVar[dict] = ContextVar("model_call_context", default={})
+MODEL_CALL_LOG_RETENTION_DAYS = 30
 
 
 @contextmanager
@@ -26,6 +29,41 @@ def model_call_context(purpose: str, session_id: str | None = None):
 
 def current_call_context() -> dict:
     return dict(_call_context.get())
+
+
+def prune_expired_model_call_logs(reference_time: datetime | None = None) -> int:
+    """Delete model-call copies that have outlived the local retention period."""
+    current_time = reference_time or datetime.now(timezone.utc)
+    cutoff = current_time - timedelta(days=MODEL_CALL_LOG_RETENTION_DAYS)
+    with connect() as db:
+        cursor = db.execute(
+            "DELETE FROM model_call_logs WHERE created_at < ?",
+            (cutoff.isoformat(timespec="microseconds"),),
+        )
+    return cursor.rowcount
+
+
+async def _run_model_call_log_retention() -> None:
+    while True:
+        await asyncio.sleep(24 * 60 * 60)
+        prune_expired_model_call_logs()
+
+
+@app.on_event("startup")
+async def start_model_call_log_retention() -> None:
+    prune_expired_model_call_logs()
+    app.state.model_call_log_retention_task = asyncio.create_task(_run_model_call_log_retention())
+
+
+@app.on_event("shutdown")
+async def stop_model_call_log_retention() -> None:
+    task = getattr(app.state, "model_call_log_retention_task", None)
+    if task:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
 
 
 def record_model_call(

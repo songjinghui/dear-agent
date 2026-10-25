@@ -50,7 +50,7 @@ export function ModelCallLogs({ onBack }: { onBack: () => void }) {
   }
 
   return <section className="content-page model-logs-page">
-    <div className="page-title-row"><div><span className="eyebrow">LOCAL MODEL ACTIVITY</span><h1>模型调用记录</h1><p>自动保存在本机，可查看请求内容和处理结果。</p></div><button className="secondary-button" onClick={onBack}>返回模型设置</button></div>
+    <div className="page-title-row"><div><span className="eyebrow">LOCAL MODEL ACTIVITY</span><h1>模型调用记录</h1><p>自动保存在本机，最多保留 30 天，到期后自动删除；可查看请求内容和处理结果。</p></div><button className="secondary-button" onClick={onBack}>返回模型设置</button></div>
     {error && <div className="log-inline-error">{error}</div>}
     <div className="model-logs-layout">
       <div className="settings-card model-log-list-card">
@@ -73,6 +73,6 @@ export function ModelCallLogs({ onBack }: { onBack: () => void }) {
         </>}
       </div>
     </div>
-    <p className="model-log-privacy-note">记录保存在本机数据库中，不包含 API Key。日志可能含有对话中的个人内容；可随时删除。</p>
+    <p className="model-log-privacy-note">记录保存在本机数据库中，不包含 API Key。日志可能含有对话中的个人内容，最多保留 30 天，到期后自动删除；你也可随时清空。</p>
   </section>;
 }
