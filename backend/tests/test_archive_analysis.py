@@ -1,19 +1,50 @@
+import asyncio
 import json
 import uuid
 from datetime import datetime, timedelta, timezone
+from unittest.mock import patch
 
 from companion import common
-from companion.archive_analysis_routes import CandidateDecision, decide_archive_memory_candidate
+from companion.archive_analysis_routes import CandidateDecision, call_analysis_provider, decide_archive_memory_candidate
 from companion.archive_retry import claim_due_archive_analysis_retries
 from companion.archive_organization_routes import (
     candidate_batches, claim_queued_candidate_organizations, parse_organization_groups,
     queue_candidate_organization,
 )
 from companion.memory_routes import list_memories
+from companion.providers import ProviderStatus
 from tests.support import ApiFeatureTestCase
 
 
 class ArchiveAnalysisFeatureTests(ApiFeatureTestCase):
+    def test_archive_analysis_uses_selected_cli_provider(self) -> None:
+        class RecordingProvider:
+            display_name = "Codex Agent"
+
+            def __init__(self) -> None:
+                self.context = None
+
+            def status(self) -> ProviderStatus:
+                return ProviderStatus(available=True, authenticated=True)
+
+            async def run_turn(self, context, on_delta) -> str:
+                self.context = context
+                return '{"summary":"本地 CLI 分析完成"}'
+
+        provider = RecordingProvider()
+        with (
+            patch("companion.archive_analysis_routes.read_settings", return_value={"provider": "codex-app-server"}),
+            patch.object(common.cli_providers, "get", return_value=provider),
+        ):
+            answer = asyncio.run(call_analysis_provider("job-123", "分析提示词", "导入的会话内容"))
+
+        self.assertEqual(answer, '{"summary":"本地 CLI 分析完成"}')
+        self.assertIsNotNone(provider.context)
+        self.assertEqual(provider.context.session_id, "archive-analysis:job-123")
+        self.assertEqual(provider.context.prompt, "分析提示词")
+        self.assertEqual(provider.context.content, "导入的会话内容")
+        self.assertEqual(provider.context.prior_history, [])
+
     def test_organization_batches_fit_limit_and_preserve_all_candidates(self) -> None:
         candidates = [{"id": str(index), "topic": "主题", "content": "x" * 3000} for index in range(3)]
         batches = candidate_batches(candidates, max_chars=8000)
