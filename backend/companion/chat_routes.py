@@ -378,12 +378,12 @@ async def chat(payload: ChatInput) -> dict:
         with connect() as db:
             if settings["provider"] == "openai-compatible":
                 history = db.execute(
-                    "SELECT id, role, content, sequence FROM messages WHERE session_id=? AND sequence>? ORDER BY sequence",
+                    "SELECT id, role, content, created_at, sequence FROM messages WHERE session_id=? AND sequence>? ORDER BY sequence",
                     (payload.session_id, summary_record["through_sequence"]),
                 ).fetchall()
             else:
                 history = db.execute(
-                    "SELECT id, role, content, sequence FROM messages WHERE session_id=? AND sequence>? ORDER BY sequence DESC LIMIT 20",
+                    "SELECT id, role, content, created_at, sequence FROM messages WHERE session_id=? AND sequence>? ORDER BY sequence DESC LIMIT 20",
                     (payload.session_id, summary_record["through_sequence"]),
                 ).fetchall()
         stored_history = [dict(row) for row in reversed(history)] if settings["provider"] != "openai-compatible" else [dict(row) for row in history]

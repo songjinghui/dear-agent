@@ -4,6 +4,38 @@ from companion.context_builder import compose_context
 
 
 class ContextBuilderTests(TestCase):
+    def test_message_times_and_current_time_anchor_are_sent_to_the_model(self) -> None:
+        history = [
+            {
+                "id": "previous-assistant", "role": "assistant", "content": "上次的回复",
+                "created_at": "2026-10-18T09:00:00+08:00",
+            },
+            {
+                "id": "current-user", "role": "user", "content": "今天想继续聊聊",
+                "created_at": "2026-10-25T09:00:00+08:00",
+            },
+        ]
+
+        context = compose_context(
+            base_prompt="固定系统规则",
+            current_message_id="current-user",
+            stored_history=history,
+            now_iso="2026-10-25T09:00:00+08:00",
+            timezone_name="Asia/Shanghai",
+        )
+
+        self.assertIn("当前时间：2026-10-25 09:00:00", context.system_prompt)
+        self.assertIn("时区：Asia/Shanghai", context.system_prompt)
+        self.assertIn("距上次对话：7 天", context.system_prompt)
+        self.assertEqual(
+            context.api_messages[1]["content"],
+            "[消息时间：2026-10-18 09:00:00（Asia/Shanghai）]\n上次的回复",
+        )
+        self.assertEqual(
+            context.api_messages[-1]["content"],
+            "[消息时间：2026-10-25 09:00:00（Asia/Shanghai）]\n今天想继续聊聊",
+        )
+
     def test_current_message_is_separated_once_for_api_and_cli(self) -> None:
         history = [
             {"id": "old-user", "role": "user", "content": "重复的问题"},
