@@ -329,3 +329,61 @@ class ModelCallLogFeatureTests(ApiFeatureTestCase):
                 "SELECT content FROM messages WHERE session_id=? AND role='assistant'", (session_id,),
             ).fetchone()
         self.assertEqual(reply["content"], "测试回复")
+
+    def test_cli_turn_continues_after_the_sse_consumer_disconnects(self) -> None:
+        session_id = "cli-disconnect-session"
+        timestamp = common.now()
+        with common.connect() as db:
+            db.execute(
+                "INSERT INTO sessions(id,title,created_at,updated_at,mode,origin) VALUES (?,?,?,?,?,?)",
+                (session_id, "CLI 断连测试", timestamp, timestamp, "chat", "native"),
+            )
+
+        class DelayedProvider:
+            display_name = "Delayed CLI"
+
+            def __init__(self) -> None:
+                self.started = asyncio.Event()
+                self.release = asyncio.Event()
+                self.cancelled = asyncio.Event()
+                self.completed = asyncio.Event()
+
+            async def run_turn(self, _context, _on_delta):
+                self.started.set()
+                try:
+                    await self.release.wait()
+                except asyncio.CancelledError:
+                    self.cancelled.set()
+                    raise
+                self.completed.set()
+                return "断连后仍要保存的回复"
+
+        provider = DelayedProvider()
+
+        async def simulate_disconnect() -> None:
+            stream = chat_routes.stream_cli_chat(
+                "delayed-cli", session_id, "native",
+                {"id": "user-1", "session_id": session_id, "content": "测试"},
+                "测试", "系统提示", [],
+            )
+            consumer = asyncio.create_task(anext(stream))
+            await provider.started.wait()
+            consumer.cancel()
+            try:
+                await consumer
+            except (asyncio.CancelledError, StopAsyncIteration):
+                pass
+            await asyncio.sleep(0)
+            self.assertFalse(provider.cancelled.is_set())
+            provider.release.set()
+            await asyncio.wait_for(provider.completed.wait(), timeout=1)
+            await asyncio.sleep(0)
+
+        with patch.object(chat_routes.cli_providers, "get", return_value=provider):
+            asyncio.run(simulate_disconnect())
+
+        with common.connect() as db:
+            reply = db.execute(
+                "SELECT content FROM messages WHERE session_id=? AND role='assistant'", (session_id,),
+            ).fetchone()
+        self.assertEqual(reply["content"], "断连后仍要保存的回复")

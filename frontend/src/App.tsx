@@ -1,15 +1,24 @@
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "./api";
+import { AssistantReply } from "./AssistantReply";
 import { ImageAttachments } from "./ImageAttachments";
 import { useChatSessionSync } from "./useChatSessionSync";
 import { ModelCallLogs } from "./ModelCallLogs";
 import { MemoryPrivacySettings } from "./MemoryPrivacySettings";
 import { MemorySuggestions } from "./MemorySuggestions";
+import { pageFromPathname, pathForPage } from "./routes";
 import { ArchiveCandidateOrganization, OriginalCandidates } from "./ArchiveCandidateOrganization";
 import { emptySettings, formatBytes, labels } from "./constants";
 import type { ArchiveAnalysis, ArchiveImport, ArchivePage, ArchivePreview, ArchiveSession, AnalysisReference, Memory, MemoryCandidate, MemorySuggestion, Message, Page, Session, Settings, Theme } from "./types";
+
+function mergeMemorySuggestions(current: MemorySuggestion[], updates: MemorySuggestion[]) {
+  const byId = new Map(current.map((item) => [item.id, item]));
+  updates.forEach((item) => byId.set(item.id, item));
+  return [...byId.values()];
+}
+
 function App() {
-  const [page, setPage] = useState<Page>("chat");
+  const [page, setCurrentPage] = useState<Page>(() => pageFromPathname(window.location.pathname));
   const [sessions, setSessions] = useState<Session[]>([]);
   const [sessionId, setSessionId] = useState("");
   const [messages, setMessages] = useState<Message[]>([]);
@@ -23,6 +32,7 @@ function App() {
   const [busy, setBusy] = useState(false);
   const [sessionCreationPending, setSessionCreationPending] = useState(false);
   const [streamingMessageId, setStreamingMessageId] = useState<string | null>(null);
+  const [animatedMessageId, setAnimatedMessageId] = useState<string | null>(null);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [apiKey, setApiKey] = useState("");
@@ -56,6 +66,13 @@ function App() {
   const creatingSessionRef = useRef(false);
   const archiveFileQueueRef = useRef<File[]>([]);
   const archiveReportsRef = useRef<string[]>([]);
+  const pendingAssistantReplacementRef = useRef<{ localId: string; message: Message } | null>(null);
+  const navigate = useCallback((nextPage: Page) => {
+    const pathname = pathForPage(nextPage);
+    if (window.location.pathname !== pathname) window.history.pushState(null, "", pathname);
+    setCurrentPage(nextPage);
+  }, []);
+  const setPage = navigate;
   const filteredArchiveConversations = useMemo(() => {
     const query = archivePreviewQuery.trim().toLocaleLowerCase();
     const conversations = archivePreview?.conversations ?? [];
@@ -66,6 +83,11 @@ function App() {
     document.documentElement.dataset.theme = theme;
     localStorage.setItem("companion-theme", theme);
   }, [theme]);
+  useEffect(() => {
+    const onPopState = () => setCurrentPage(pageFromPathname(window.location.pathname));
+    window.addEventListener("popstate", onPopState);
+    return () => window.removeEventListener("popstate", onPopState);
+  }, []);
   const refreshSessions = useCallback(async () => setSessions(await api<Session[]>("/api/sessions")), []);
   const refreshMemories = useCallback(async (query = "") => {
     setMemories(await api<Memory[]>(`/api/memories${query ? `?q=${encodeURIComponent(query)}` : ""}`));
@@ -319,12 +341,11 @@ function App() {
     if (!content || busy || !sessionId) return;
     setDraft(""); setError(""); setBusy(true);
     const optimistic: Message = { id: crypto.randomUUID(), role: "user", content, created_at: new Date().toISOString() };
-    const streamCLI = settings.provider !== "openai-compatible" && !/^\s*(?:请)?记住/.test(content);
-    const optimisticAssistant: Message | null = streamCLI ? {
+    const optimisticAssistant: Message = {
       id: crypto.randomUUID(), role: "assistant", content: "", created_at: new Date().toISOString(),
-    } : null;
-    setStreamingMessageId(optimisticAssistant?.id ?? null);
-    setMessages((current) => [...current, optimistic, ...(optimisticAssistant ? [optimisticAssistant] : [])]);
+    };
+    setStreamingMessageId(optimisticAssistant.id);
+    setMessages((current) => [...current, optimistic, optimisticAssistant]);
     try {
       let sensitiveApprovals: Record<string, string> = {};
       if (!/^\s*(?:请)?记住/.test(content)) {
@@ -361,8 +382,17 @@ function App() {
               : message));
           } else if (item.type === "done" && item.user_message && item.assistant_message) {
             complete = true;
-            setMessages((current) => [...current.filter((message) => message.id !== optimistic.id && message.id !== optimisticAssistant?.id), item.user_message!, item.assistant_message!]);
-            setMemorySuggestions((current) => [...current, ...(item.memory_suggestions || [])]);
+            pendingAssistantReplacementRef.current = {
+              localId: optimisticAssistant.id,
+              message: item.assistant_message,
+            };
+            setMessages((current) => current.map((message) => {
+              if (message.id === optimistic.id) return item.user_message!;
+              if (message.id === optimisticAssistant.id) return { ...item.assistant_message!, id: optimisticAssistant.id };
+              return message;
+            }));
+            setAnimatedMessageId(optimisticAssistant.id);
+            setMemorySuggestions((current) => mergeMemorySuggestions(current, item.memory_suggestions || []));
           } else if (item.type === "error") {
             throw new Error(item.message || "Codex 处理消息失败。");
           }
@@ -382,15 +412,24 @@ function App() {
         if (!complete) throw new Error("Codex 响应流提前结束了。");
       } else {
         const result = await response.json() as { user_message: Message; assistant_message: Message; memory_suggestions?: MemorySuggestion[] };
-        setMessages((current) => [...current.filter((message) => message.id !== optimistic.id), result.user_message, result.assistant_message]);
-        setMemorySuggestions((current) => [...current, ...(result.memory_suggestions || [])]);
+        setMessages((current) => [...current.filter((message) => message.id !== optimistic.id && message.id !== optimisticAssistant.id), result.user_message, result.assistant_message]);
+        setAnimatedMessageId(result.assistant_message.id);
+        setMemorySuggestions((current) => mergeMemorySuggestions(current, result.memory_suggestions || []));
       }
       await refreshSessions();
       if (/^\s*(?:请)?记住/.test(content)) { setNotice("已按你的明确要求保存到记忆"); window.setTimeout(() => setNotice(""), 3200); }
     } catch (e) {
-      if (optimisticAssistant) setMessages((current) => current.filter((message) => message.id !== optimisticAssistant.id));
+      if (pendingAssistantReplacementRef.current?.localId === optimisticAssistant.id) pendingAssistantReplacementRef.current = null;
+      setMessages((current) => current.filter((message) => message.id !== optimisticAssistant.id));
       setError((e as Error).message);
     } finally { setBusy(false); setStreamingMessageId(null); }
+  }
+  function finishAssistantReveal(messageId: string) {
+    setAnimatedMessageId((current) => current === messageId ? null : current);
+    const pending = pendingAssistantReplacementRef.current;
+    if (!pending || pending.localId !== messageId) return;
+    pendingAssistantReplacementRef.current = null;
+    setMessages((current) => current.map((message) => message.id === messageId ? pending.message : message));
   }
   async function saveSettings(event: FormEvent) {
     event.preventDefault(); setError(""); setNotice("");
@@ -456,7 +495,7 @@ function App() {
         <div className="chat-heading"><div><span className="eyebrow">PERSONAL COMPANION</span><h1>今天，想从哪里聊起？</h1><p>{sessions.find((item) => item.id === sessionId)?.origin === "continued" ? "正在接续一段导入的历史会话；这里展示最近 100 条，完整记录可在历史档案中查看。" : "我会认真听，也会尊重你希望保留的边界。"}</p></div><button className="new-chat-button" onClick={newSession} disabled={sessionCreationPending}>＋ <span>新对话</span></button></div>
         {chatSync.status === "processing" && <div className="chat-sync-note">正在等待模型回复；离开页面或刷新后会自动同步。</div>}
         {chatSync.status === "interrupted" && <div className="chat-sync-note interrupted">{chatSync.statusError || "上一条消息没有收到回复。你的消息仍保留在会话中。"}</div>}
-        {messages.length === 0 ? <div className="welcome-card"><div className="sun-icon">☼</div><h2>这里是你的私人空间</h2><p>你可以聊聊今天，也可以一起整理一个念头。<br />发现可能有帮助的内容时，我会先征求你的确认。</p><div className="prompt-chips"><button onClick={() => setDraft("今天有件事想和你说说。")}>聊聊今天发生的事 <span>↗</span></button><button onClick={() => setDraft("我想理一理最近的感受。")}>整理最近的感受 <span>↗</span></button></div></div> : <div className="message-list">{messages.map((message) => <article key={message.id} className={`message ${message.role}`}><div className="avatar">{message.role === "assistant" ? "拾" : "我"}</div><div className="message-body"><div className="message-label">{message.origin === "imported" ? (message.speaker_label || message.speaker || message.role) : message.role === "assistant" ? "拾光" : "你"}{message.origin === "imported" && <small className="message-origin">历史导入</small>}{message.origin === "continued" && <small className="message-origin">续聊</small>}</div>{message.id === streamingMessageId && !message.content ? <div className="typing"><i /><i /><i /></div> : <div className="message-text">{message.content}</div>}<ImageAttachments items={message.attachments} /></div></article>)}{busy && !streamingMessageId && <article className="message assistant"><div className="avatar">拾</div><div className="message-body"><div className="message-label">拾光</div><div className="typing"><i /><i /><i /></div></div></article>}<div ref={endRef} /></div>}
+        {messages.length === 0 ? <div className="welcome-card"><div className="sun-icon">☼</div><h2>这里是你的私人空间</h2><p>你可以聊聊今天，也可以一起整理一个念头。<br />发现可能有帮助的内容时，我会先征求你的确认。</p><div className="prompt-chips"><button onClick={() => setDraft("今天有件事想和你说说。")}>聊聊今天发生的事 <span>↗</span></button><button onClick={() => setDraft("我想理一理最近的感受。")}>整理最近的感受 <span>↗</span></button></div></div> : <div className="message-list">{messages.map((message) => <article key={message.id} className={`message ${message.role}`}><div className="avatar">{message.role === "assistant" ? "拾" : "我"}</div><div className="message-body"><div className="message-label">{message.origin === "imported" ? (message.speaker_label || message.speaker || message.role) : message.role === "assistant" ? "拾光" : "你"}{message.origin === "imported" && <small className="message-origin">历史导入</small>}{message.origin === "continued" && <small className="message-origin">续聊</small>}</div>{message.role === "assistant" ? <AssistantReply content={message.content} waiting={message.id === streamingMessageId && !message.content} streaming={message.id === streamingMessageId && Boolean(message.content)} revealing={message.id === animatedMessageId} onRevealComplete={() => finishAssistantReveal(message.id)} /> : <div className="message-text">{message.content}</div>}<ImageAttachments items={message.attachments} /></div></article>)}<div ref={endRef} /></div>}
         <MemorySuggestions items={memorySuggestions} onApprove={(item, edits) => void decideChatMemorySuggestion(item, "approve", edits)} onDismiss={(item) => void decideChatMemorySuggestion(item, "dismiss")} />
         <div className="composer-wrap"><div className="mode-switch"><div className="mode-switch-copy"><strong>{activeMode === "chat" ? "聊天模式" : "管家模式"}</strong><small>{activeMode === "chat" ? "倾听交流，按需给建议" : "规划安排，评估风险并跟进"}</small></div><div className="mode-switch-options" role="group" aria-label="对话模式"><button type="button" className={activeMode === "chat" ? "selected" : ""} aria-pressed={activeMode === "chat"} onClick={() => void changeSessionMode("chat")}>聊天</button><button type="button" className={activeMode === "manager" ? "selected" : ""} aria-pressed={activeMode === "manager"} onClick={() => void changeSessionMode("manager")}>管家</button></div></div><form className="composer" onSubmit={sendMessage}><textarea value={draft} onChange={(e) => setDraft(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); e.currentTarget.form?.requestSubmit(); } }} placeholder="写下你此刻想说的话…" rows={2} /><div className="composer-footer"><span><kbd>Enter</kbd> 发送 · <kbd>Shift + Enter</kbd> 换行</span><button className="send-button" disabled={!draft.trim() || busy} aria-label="发送">↑</button></div></form><div className="privacy-hint">{settings.provider !== "openai-compatible" ? `消息将由本机 ${settings.providers.find((provider) => provider.id === settings.provider)?.name || "CLI Agent"} 处理` : settings.has_api_key ? "消息将发送至你配置的模型服务" : "先在模型设置中配置服务，或直接说「记住这个：…」保存一条记忆"}{settings.use_memories_in_cloud && (settings.has_api_key || settings.has_codex_login) ? " · 相关记忆已开启注入" : ""}{settings.use_archive_history ? " · 已开启历史档案检索，相关原文会附加到模型请求" : ""}</div></div>
       </section>}

@@ -275,12 +275,13 @@ async def stream_cli_chat(
             if event["type"] in {"done", "error"}:
                 break
     finally:
+        # A browser reload or navigation closes this SSE generator, but it
+        # must not cancel the already-started local model turn. The turn has
+        # a bounded timeout and persists its final assistant message, so a
+        # later session sync can recover it.
         if not task.done():
-            task.cancel()
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
+            _detached_cli_turns.add(task)
+            task.add_done_callback(_detached_cli_turns.discard)
 
 
 @app.post("/api/chat/memory-preview")

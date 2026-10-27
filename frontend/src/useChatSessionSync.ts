@@ -14,9 +14,11 @@ export function useChatSessionSync(
   const [status, setStatus] = useState<ChatStatus>("idle");
   const [statusError, setStatusError] = useState("");
   const requestId = useRef(0);
+  const busyRef = useRef(busy);
+  busyRef.current = busy;
 
   const refresh = useCallback(async () => {
-    if (!sessionId) return;
+    if (!sessionId || busyRef.current) return;
     const currentRequest = ++requestId.current;
     const [messages, state] = await Promise.all([
       api<Message[]>(`/api/sessions/${encodeURIComponent(sessionId)}/messages`),
@@ -48,7 +50,9 @@ export function useChatSessionSync(
   }, [active, sessionId, refresh]);
 
   useEffect(() => {
-    if (!active || !sessionId || (!busy && status !== "processing")) return;
+    // A live request already owns its optimistic assistant message. Polling here
+    // would replace it with the server's incomplete history before the reply is saved.
+    if (!active || !sessionId || busy || status !== "processing") return;
     let timer = 0;
     let cancelled = false;
     const poll = async () => {
