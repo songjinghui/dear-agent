@@ -39,18 +39,40 @@ async def call_model(settings: dict, api_key: str, messages: list[dict]) -> str:
     import time
 
     base = settings["base_url"].rstrip("/")
-    endpoint = base if base.endswith("/chat/completions") else f"{base}/chat/completions"
-    payload = {
-        "model": settings["model"],
-        "messages": messages,
-        "temperature": settings["temperature"],
-        "max_tokens": settings["max_tokens"],
-    }
     context = current_call_context()
+    session_id = context.get("session_id")
+    resumable_turn = settings.get("api_protocol") == "responses" and context.get("purpose") == "对话"
+    if settings.get("api_protocol") == "responses":
+        endpoint = base if base.endswith("/responses") else f"{base}/responses"
+        instructions = "\n\n".join(item["content"] for item in messages if item.get("role") == "system")
+        api_input = [item for item in messages if item.get("role") != "system"]
+        payload = {
+            "model": settings["model"],
+            "instructions": instructions,
+            "input": api_input,
+            "temperature": settings["temperature"],
+            "max_output_tokens": settings["max_tokens"],
+        }
+        continuation = _get_responses_continuation(session_id, settings) if resumable_turn and session_id else None
+        if continuation:
+            payload[continuation[0]] = continuation[1]
+            latest_user_message = next((item for item in reversed(api_input) if item.get("role") == "user"), None)
+            if latest_user_message:
+                payload["input"] = [latest_user_message]
+    else:
+        if context.get("purpose") == "对话" and session_id:
+            _clear_responses_continuation(session_id)
+        endpoint = base if base.endswith("/chat/completions") else f"{base}/chat/completions"
+        payload = {
+            "model": settings["model"],
+            "messages": messages,
+            "temperature": settings["temperature"],
+            "max_tokens": settings["max_tokens"],
+        }
     log_id = record_model_call(
         provider="openai-compatible", model=settings["model"],
         purpose=context.get("purpose", "对话"), request=payload,
-        session_id=context.get("session_id"),
+        session_id=session_id,
     )
     started = time.perf_counter()
     try:
@@ -58,7 +80,12 @@ async def call_model(settings: dict, api_key: str, messages: list[dict]) -> str:
             response = await client.post(endpoint, json=payload, headers={"Authorization": f"Bearer {api_key}"})
             response.raise_for_status()
         data = response.json()
-        answer = data["choices"][0]["message"]["content"]
+        if settings.get("api_protocol") == "responses":
+            answer = _responses_output_text(data)
+            if resumable_turn and session_id:
+                _save_responses_continuation(session_id, settings, data)
+        else:
+            answer = data["choices"][0]["message"]["content"]
         finish_model_call(log_id, status="complete", response_preview=str(answer)[:2000], duration_ms=round((time.perf_counter() - started) * 1000))
         return answer
     except asyncio.CancelledError:
@@ -68,6 +95,81 @@ async def call_model(settings: dict, api_key: str, messages: list[dict]) -> str:
         error_text = str(exc).replace(api_key, "[已隐藏]") if api_key else str(exc)
         finish_model_call(log_id, status="failed", error=error_text[:1000], duration_ms=round((time.perf_counter() - started) * 1000))
         raise
+
+
+def _responses_fingerprint(settings: dict) -> str:
+    return f"{settings['base_url'].rstrip('/')}|{settings['model']}"
+
+
+def _get_responses_continuation(session_id: str, settings: dict) -> tuple[str, str] | None:
+    with connect() as db:
+        rows = {
+            row["state_key"]: row["state_value"]
+            for row in db.execute(
+                "SELECT state_key,state_value FROM provider_session_state "
+                "WHERE session_id=? AND provider_id='openai-compatible' AND state_key IN (?,?,?)",
+                (session_id, "responses_continuation_id", "responses_continuation_kind", "responses_fingerprint"),
+            )
+        }
+    if rows.get("responses_fingerprint") != _responses_fingerprint(settings):
+        return None
+    continuation_id = rows.get("responses_continuation_id")
+    kind = rows.get("responses_continuation_kind", "previous_response_id")
+    if not continuation_id:
+        return None
+    return ("conversation" if kind == "conversation" else "previous_response_id", continuation_id)
+
+
+def _clear_responses_continuation(session_id: str) -> None:
+    with connect() as db:
+        db.execute(
+            "DELETE FROM provider_session_state WHERE session_id=? AND provider_id='openai-compatible' "
+            "AND state_key LIKE 'responses_%'",
+            (session_id,),
+        )
+
+
+def _save_responses_continuation(session_id: str, settings: dict, data: dict) -> None:
+    conversation = data.get("conversation")
+    if isinstance(conversation, dict):
+        continuation_id = conversation.get("id")
+    else:
+        continuation_id = data.get("conversation_id") or (conversation if isinstance(conversation, str) else None)
+    kind = "conversation" if isinstance(continuation_id, str) and continuation_id else "previous_response_id"
+    if not continuation_id:
+        continuation_id = data.get("id")
+    if not isinstance(continuation_id, str) or not continuation_id:
+        return
+    fingerprint = _responses_fingerprint(settings)
+    with connect() as db:
+        for key, value in (
+            ("responses_continuation_id", continuation_id),
+            ("responses_continuation_kind", kind),
+            ("responses_fingerprint", fingerprint),
+        ):
+            db.execute(
+                "INSERT INTO provider_session_state(session_id,provider_id,state_key,state_value) VALUES (?, ?, ?, ?) "
+                "ON CONFLICT(session_id,provider_id,state_key) DO UPDATE SET state_value=excluded.state_value",
+                (session_id, "openai-compatible", key, value),
+            )
+
+
+def _responses_output_text(data: dict) -> str:
+    output_text = data.get("output_text")
+    if isinstance(output_text, str):
+        return output_text
+    pieces = []
+    for item in data.get("output", []):
+        if not isinstance(item, dict):
+            continue
+        for content in item.get("content", []):
+            if isinstance(content, dict) and content.get("type") == "output_text":
+                text = content.get("text")
+                if isinstance(text, str):
+                    pieces.append(text)
+    if not pieces:
+        raise ValueError("Responses API 响应中没有可显示的文本。")
+    return "".join(pieces)
 
 
 async def stream_cli_chat(

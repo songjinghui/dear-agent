@@ -369,6 +369,7 @@ def initialize() -> None:
             db.execute("ALTER TABLE archive_memory_candidates ADD COLUMN topic TEXT NOT NULL DEFAULT ''")
         for key, value in {
             "provider": "openai-compatible",
+            "api_protocol": "chat_completions",
             "base_url": "https://api.openai.com/v1",
             "model": "gpt-4o-mini",
             "temperature": "0.7",
@@ -409,6 +410,7 @@ def read_settings() -> dict:
         "use_vector_memory_search": values.get("use_vector_memory_search", "false") == "true",
         "use_archive_history": values.get("use_archive_history", "false") == "true",
         "default_mode": values.get("default_mode", "chat") if values.get("default_mode") in {"chat", "manager"} else "chat",
+        "api_protocol": values.get("api_protocol", "chat_completions") if values.get("api_protocol") in {"chat_completions", "responses"} else "chat_completions",
         "has_api_key": bool(keyring.get_password(KEYRING_SERVICE, KEYRING_USER)),
         "codex_available": codex_status.get("available", False),
         "has_codex_login": codex_status.get("authenticated", False),

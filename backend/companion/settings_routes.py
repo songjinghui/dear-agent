@@ -8,6 +8,7 @@ from .memory_embeddings import is_local_embedding_url
 
 class SettingsInput(BaseModel):
     provider: str = Field(default="openai-compatible", min_length=1, max_length=100)
+    api_protocol: Literal["chat_completions", "responses"] = "chat_completions"
     base_url: str = Field(min_length=1, max_length=500)
     model: str = Field(min_length=1, max_length=200)
     temperature: float = Field(default=0.7, ge=0, le=2)

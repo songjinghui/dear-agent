@@ -109,3 +109,16 @@ class SettingsFeatureTests(ApiFeatureTestCase):
             result = put_settings(payload)
 
         self.assertEqual(result["context_window_tokens"], 12000)
+
+    def test_responses_api_protocol_can_be_selected_and_saved(self) -> None:
+        payload = SettingsInput(
+            base_url="https://api.openai.com/v1",
+            model="gpt-4.1-mini",
+            api_protocol="responses",
+        )
+        with patch.object(common.keyring, "get_password", return_value=None), patch.object(
+            common.cli_providers, "list", return_value=[],
+        ):
+            result = put_settings(payload)
+
+        self.assertEqual(result["api_protocol"], "responses")

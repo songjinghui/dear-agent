@@ -7,6 +7,7 @@ from companion.model_call_logs import (
     delete_model_call_log, finish_model_call, get_model_call_log,
     list_model_call_logs, prune_expired_model_call_logs, record_model_call,
 )
+from companion.session_routes import SessionInput, create_session
 from tests.support import ApiFeatureTestCase
 
 
@@ -32,6 +33,190 @@ class ModelCallLogFeatureTests(ApiFeatureTestCase):
         self.assertEqual(prune_expired_model_call_logs(reference_time), 1)
         self.assertEqual(list_model_call_logs()["total"], 1)
         self.assertEqual(list_model_call_logs()["items"][0]["id"], retained_id)
+
+    def test_responses_api_conversation_is_saved_and_reused_for_the_same_local_session(self) -> None:
+        session_id = create_session(SessionInput(title="Responses 会话续接测试"))["id"]
+        responses = [
+            {"id": "resp_1", "conversation": {"id": "conv_1"}, "output": [{"type": "message", "content": [{"type": "output_text", "text": "第一条回复"}]}]},
+            {"id": "resp_2", "conversation": {"id": "conv_1"}, "output": [{"type": "message", "content": [{"type": "output_text", "text": "第二条回复"}]}]},
+        ]
+        requests = []
+
+        class Response:
+            def __init__(self, data):
+                self.data = data
+
+            def raise_for_status(self) -> None:
+                return None
+
+            def json(self) -> dict:
+                return self.data
+
+        class Client:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                return None
+
+            async def post(self, _url, json, **_kwargs):
+                requests.append(json)
+                return Response(responses.pop(0))
+
+        settings = {
+            "base_url": "https://api.example.com/v1", "model": "test-model",
+            "temperature": 0.2, "max_tokens": 80, "api_protocol": "responses",
+        }
+        with patch.object(chat_routes.httpx, "AsyncClient", return_value=Client()):
+            for messages in (
+                [{"role": "system", "content": "系统提示"}, {"role": "user", "content": "第一问"}],
+                [{"role": "system", "content": "更新后的提示"}, {"role": "user", "content": "第二问"}],
+            ):
+                with chat_routes.model_call_context("对话", session_id):
+                    coroutine = chat_routes.call_model(settings, "secret-key", messages)
+                    with self.assertRaises(StopIteration) as completed:
+                        coroutine.send(None)
+                    self.assertIn("回复", completed.exception.value)
+
+        self.assertNotIn("conversation", requests[0])
+        self.assertEqual(requests[1]["conversation"], "conv_1")
+        self.assertEqual(requests[1]["input"], [{"role": "user", "content": "第二问"}])
+        self.assertEqual(requests[1]["instructions"], "更新后的提示")
+        with chat_routes.connect() as db:
+            saved = db.execute(
+                "SELECT state_value FROM provider_session_state WHERE session_id=? AND provider_id=? AND state_key=?",
+                (session_id, "openai-compatible", "responses_continuation_id"),
+            ).fetchone()
+        self.assertEqual(saved["state_value"], "conv_1")
+
+    def test_responses_api_reuses_response_id_with_previous_response_id(self) -> None:
+        session_id = create_session(SessionInput(title="Responses response ID 测试"))["id"]
+        class Response:
+            def raise_for_status(self) -> None:
+                return None
+
+            def json(self) -> dict:
+                return {"id": "resp_only", "output": [{"type": "message", "content": [{"type": "output_text", "text": "完成"}]}]}
+
+        requests = []
+
+        class Client:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                return None
+
+            async def post(self, _url, json, **_kwargs):
+                requests.append(json)
+                return Response()
+
+        settings = {
+            "base_url": "https://api.example.com/v1", "model": "test-model",
+            "temperature": 0.2, "max_tokens": 80, "api_protocol": "responses",
+        }
+        with patch.object(chat_routes.httpx, "AsyncClient", return_value=Client()):
+            for content in ("第一问", "第二问"):
+                with chat_routes.model_call_context("对话", session_id):
+                    coroutine = chat_routes.call_model(
+                        settings, "secret-key", [{"role": "user", "content": content}],
+                    )
+                    with self.assertRaises(StopIteration):
+                        coroutine.send(None)
+
+        self.assertNotIn("conversation", requests[0])
+        self.assertNotIn("previous_response_id", requests[0])
+        self.assertEqual(requests[1]["previous_response_id"], "resp_only")
+        self.assertEqual(requests[1]["input"], [{"role": "user", "content": "第二问"}])
+        with chat_routes.connect() as db:
+            saved = db.execute(
+                "SELECT state_value FROM provider_session_state WHERE session_id=? AND provider_id=? AND state_key=?",
+                (session_id, "openai-compatible", "responses_continuation_id"),
+            ).fetchone()
+        self.assertEqual(saved["state_value"], "resp_only")
+
+    def test_chat_completion_id_is_not_used_as_a_resumable_api_conversation(self) -> None:
+        session_id = create_session(SessionInput(title="Chat Completions ID 测试"))["id"]
+        class Response:
+            def raise_for_status(self) -> None:
+                return None
+
+            def json(self) -> dict:
+                return {"id": "chatcmpl_one_turn", "choices": [{"message": {"content": "完成"}}]}
+
+        requests = []
+
+        class Client:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                return None
+
+            async def post(self, _url, json, **_kwargs):
+                requests.append(json)
+                return Response()
+
+        settings = {
+            "base_url": "https://api.example.com/v1", "model": "test-model",
+            "temperature": 0.2, "max_tokens": 80,
+        }
+        with patch.object(chat_routes.httpx, "AsyncClient", return_value=Client()):
+            for content in ("第一问", "第二问"):
+                with chat_routes.model_call_context("对话", session_id):
+                    coroutine = chat_routes.call_model(
+                        settings, "secret-key", [{"role": "user", "content": content}],
+                    )
+                    with self.assertRaises(StopIteration):
+                        coroutine.send(None)
+
+        self.assertNotIn("conversation", requests[1])
+        self.assertNotIn("previous_response_id", requests[1])
+
+    def test_chat_completions_turn_clears_stale_responses_continuation(self) -> None:
+        session_id = create_session(SessionInput(title="协议切换清理测试"))["id"]
+        with common.connect() as db:
+            db.executemany(
+                "INSERT INTO provider_session_state(session_id,provider_id,state_key,state_value) VALUES (?,?,?,?)",
+                [
+                    (session_id, "openai-compatible", "responses_continuation_id", "old-response"),
+                    (session_id, "openai-compatible", "responses_continuation_kind", "previous_response_id"),
+                    (session_id, "openai-compatible", "responses_fingerprint", "https://api.example.com/v1|test-model"),
+                ],
+            )
+
+        class Response:
+            def raise_for_status(self) -> None:
+                return None
+
+            def json(self) -> dict:
+                return {"id": "chatcmpl_new", "choices": [{"message": {"content": "完成"}}]}
+
+        class Client:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                return None
+
+            async def post(self, *_args, **_kwargs):
+                return Response()
+
+        with patch.object(chat_routes.httpx, "AsyncClient", return_value=Client()):
+            with chat_routes.model_call_context("对话", session_id):
+                coroutine = chat_routes.call_model({
+                    "base_url": "https://api.example.com/v1", "model": "test-model",
+                    "temperature": 0.2, "max_tokens": 80,
+                }, "secret-key", [{"role": "user", "content": "切回 Chat Completions"}])
+                with self.assertRaises(StopIteration):
+                    coroutine.send(None)
+
+        with common.connect() as db:
+            saved = db.execute(
+                "SELECT state_key FROM provider_session_state WHERE session_id=? AND provider_id=? AND state_key LIKE 'responses_%'",
+                (session_id, "openai-compatible"),
+            ).fetchall()
+        self.assertEqual(saved, [])
 
     def test_direct_api_call_is_recorded_with_the_exact_messages(self) -> None:
         class Response:
