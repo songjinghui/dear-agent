@@ -42,7 +42,7 @@ KEYRING_USER = "model-api-key"
 cli_providers = CLIProviderRegistry()
 cli_providers.register(CodexProvider())
 
-app = FastAPI(title="个人生活 Agent", version="0.1.0")
+app = FastAPI(title="个人生活 Agent", version="1.0.0")
 
 
 def now() -> str:
@@ -176,10 +176,12 @@ def initialize() -> None:
                 session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
                 message_id TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
                 content TEXT NOT NULL,
+                topic TEXT NOT NULL DEFAULT '',
                 memory_type TEXT NOT NULL,
                 importance INTEGER NOT NULL DEFAULT 3,
                 sensitivity TEXT NOT NULL DEFAULT 'normal',
                 evidence TEXT NOT NULL,
+                evidence_refs TEXT NOT NULL DEFAULT '[]',
                 rationale TEXT NOT NULL DEFAULT '',
                 expires_at TEXT,
                 status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','approved','dismissed')),
@@ -367,6 +369,11 @@ def initialize() -> None:
         candidate_columns = {row["name"] for row in db.execute("PRAGMA table_info(archive_memory_candidates)")}
         if "topic" not in candidate_columns:
             db.execute("ALTER TABLE archive_memory_candidates ADD COLUMN topic TEXT NOT NULL DEFAULT ''")
+        suggestion_columns = {row["name"] for row in db.execute("PRAGMA table_info(memory_suggestions)")}
+        if "evidence_refs" not in suggestion_columns:
+            db.execute("ALTER TABLE memory_suggestions ADD COLUMN evidence_refs TEXT NOT NULL DEFAULT '[]'")
+        if "topic" not in suggestion_columns:
+            db.execute("ALTER TABLE memory_suggestions ADD COLUMN topic TEXT NOT NULL DEFAULT ''")
         for key, value in {
             "provider": "openai-compatible",
             "api_protocol": "chat_completions",

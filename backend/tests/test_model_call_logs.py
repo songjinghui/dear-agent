@@ -3,6 +3,7 @@ from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
 from companion import chat_routes, common
+from companion.context_builder import ComposedContext
 from companion.model_call_logs import (
     delete_model_call_log, finish_model_call, get_model_call_log,
     list_model_call_logs, prune_expired_model_call_logs, record_model_call,
@@ -12,6 +13,48 @@ from tests.support import ApiFeatureTestCase
 
 
 class ModelCallLogFeatureTests(ApiFeatureTestCase):
+    def test_pending_memory_candidates_are_only_injected_when_memory_context_is_enabled(self) -> None:
+        captured_prompts = []
+        settings = {
+            "provider": "openai-compatible", "base_url": "https://api.example.com/v1",
+            "model": "test-model", "temperature": 0.2, "max_tokens": 80,
+            "use_memories_in_cloud": False, "use_vector_memory_search": False,
+            "use_archive_history": False, "agent_definition": "", "chat_mode_prompt": "",
+        }
+
+        async def prepare_context(**kwargs):
+            captured_prompts.append(kwargs["base_prompt"])
+            return ComposedContext(
+                system_prompt="fixed", prior_history=[],
+                current_message={"id": "current", "role": "user", "content": "test"},
+            )
+
+        async def reply(*_args):
+            return "normal reply"
+
+        with (
+            patch.object(chat_routes, "read_settings", side_effect=lambda: dict(settings)),
+            patch.object(chat_routes.keyring, "get_password", return_value="secret-key"),
+            patch.object(chat_routes, "pending_normal_memory_suggestions", return_value=[{
+                "id": "candidate-1", "topic": "ongoing topic",
+                "content": "pending candidate", "memory_type": "working",
+            }]),
+            patch.object(chat_routes, "prepare_direct_api_context", side_effect=prepare_context),
+            patch.object(chat_routes, "call_with_context_retry", side_effect=reply),
+        ):
+            disabled_session = create_session(SessionInput(title="memory context disabled"))
+            asyncio.run(chat_routes.chat(chat_routes.ChatInput(
+                session_id=disabled_session["id"], content="first message",
+            )))
+            settings["use_memories_in_cloud"] = True
+            enabled_session = create_session(SessionInput(title="memory context enabled"))
+            asyncio.run(chat_routes.chat(chat_routes.ChatInput(
+                session_id=enabled_session["id"], content="second message",
+            )))
+
+        self.assertNotIn("待整理候选", captured_prompts[0])
+        self.assertIn("待整理候选", captured_prompts[1])
+
     def test_logs_expire_after_thirty_days_without_deleting_newer_records(self) -> None:
         reference_time = datetime(2026, 10, 25, 15, 0, tzinfo=timezone.utc)
         expired_id = record_model_call(
@@ -253,6 +296,99 @@ class ModelCallLogFeatureTests(ApiFeatureTestCase):
         self.assertEqual(detail["request"]["messages"], messages)
         self.assertEqual(detail["request"]["model"], "test-model")
         self.assertNotIn("secret-key", str(detail))
+
+    def test_deepseek_chat_completions_disables_thinking_and_keeps_final_text(self) -> None:
+        requests = []
+
+        class Response:
+            def raise_for_status(self) -> None:
+                return None
+
+            def json(self) -> dict:
+                return {"choices": [{"message": {"content": "可显示的最终回答"}}]}
+
+        class Client:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                return None
+
+            async def post(self, _url, json, **_kwargs):
+                requests.append(json)
+                return Response()
+
+        with patch.object(chat_routes.httpx, "AsyncClient", return_value=Client()):
+            coroutine = chat_routes.call_model({
+                "base_url": "https://api.deepseek.com", "model": "deepseek-flash",
+                "temperature": 0.2, "max_tokens": 80,
+            }, "secret-key", [{"role": "user", "content": "请回复一句话"}])
+            with self.assertRaises(StopIteration) as completed:
+                coroutine.send(None)
+
+        self.assertEqual(completed.exception.value, "可显示的最终回答")
+        self.assertEqual(requests[0]["thinking"], {"type": "disabled"})
+
+    def test_other_openai_compatible_endpoints_do_not_receive_deepseek_thinking_option(self) -> None:
+        requests = []
+
+        class Response:
+            def raise_for_status(self) -> None:
+                return None
+
+            def json(self) -> dict:
+                return {"choices": [{"message": {"content": "正常回复"}}]}
+
+        class Client:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                return None
+
+            async def post(self, _url, json, **_kwargs):
+                requests.append(json)
+                return Response()
+
+        with patch.object(chat_routes.httpx, "AsyncClient", return_value=Client()):
+            coroutine = chat_routes.call_model({
+                "base_url": "https://api.example.com/v1", "model": "test-model",
+                "temperature": 0.2, "max_tokens": 80,
+            }, "secret-key", [{"role": "user", "content": "请回复一句话"}])
+            with self.assertRaises(StopIteration):
+                coroutine.send(None)
+
+        self.assertNotIn("thinking", requests[0])
+
+    def test_empty_chat_completion_content_is_failed_not_recorded_as_complete(self) -> None:
+        class Response:
+            def raise_for_status(self) -> None:
+                return None
+
+            def json(self) -> dict:
+                return {"choices": [{"message": {"content": "   "}}]}
+
+        class Client:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                return None
+
+            async def post(self, *_args, **_kwargs):
+                return Response()
+
+        with patch.object(chat_routes.httpx, "AsyncClient", return_value=Client()):
+            coroutine = chat_routes.call_model({
+                "base_url": "https://api.example.com/v1", "model": "test-model",
+                "temperature": 0.2, "max_tokens": 80,
+            }, "secret-key", [{"role": "user", "content": "请回复一句话"}])
+            with self.assertRaisesRegex(ValueError, "可显示的文本"):
+                coroutine.send(None)
+
+        log = list_model_call_logs()["items"][0]
+        self.assertEqual(log["status"], "failed")
+        self.assertNotIn("secret-key", str(get_model_call_log(log["id"])))
 
     def test_request_is_saved_locally_and_can_be_inspected_and_deleted(self) -> None:
         log_id = record_model_call(

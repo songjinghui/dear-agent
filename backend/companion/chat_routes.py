@@ -7,13 +7,16 @@ from .context_builder import compose_context
 from .context_runtime import ContextBudgetExceeded, call_with_context_retry, prepare_direct_api_context
 from .context_store import get_session_summary
 from .memory_context import memory_fingerprint, select_memories_for_context
-from .memory_protocol import MEMORY_RESPONSE_INSTRUCTIONS
+from .memory_protocol import MEMORY_RESPONSE_INSTRUCTIONS, pending_memory_merge_instructions
 from .memory_routes import MemoryInput, create_memory, search_relevant_memories
-from .memory_suggestions import process_agent_response
+from .memory_suggestions import pending_normal_memory_suggestions, process_agent_response
 from .model_call_logs import (
     current_call_context, finish_model_call, model_call_context, record_model_call,
     update_model_call_request,
 )
+
+_detached_cli_turns: set[asyncio.Task] = set()
+
 
 class ChatInput(BaseModel):
     session_id: str
@@ -69,6 +72,11 @@ async def call_model(settings: dict, api_key: str, messages: list[dict]) -> str:
             "temperature": settings["temperature"],
             "max_tokens": settings["max_tokens"],
         }
+        # DeepSeek Chat Completions defaults to reasoning mode.  This app only
+        # displays the final content field, so request a conventional final
+        # answer rather than allowing an all-reasoning turn to look complete.
+        if urlparse(base).hostname == "api.deepseek.com":
+            payload["thinking"] = {"type": "disabled"}
     log_id = record_model_call(
         provider="openai-compatible", model=settings["model"],
         purpose=context.get("purpose", "对话"), request=payload,
@@ -85,7 +93,10 @@ async def call_model(settings: dict, api_key: str, messages: list[dict]) -> str:
             if resumable_turn and session_id:
                 _save_responses_continuation(session_id, settings, data)
         else:
-            answer = data["choices"][0]["message"]["content"]
+            answer = data["choices"][0]["message"].get("content")
+            if not isinstance(answer, str) or not answer.strip():
+                raise ValueError("模型响应中没有可显示的文本。")
+            answer = answer.strip()
         finish_model_call(log_id, status="complete", response_preview=str(answer)[:2000], duration_ms=round((time.perf_counter() - started) * 1000))
         return answer
     except asyncio.CancelledError:
@@ -411,6 +422,10 @@ async def chat(payload: ChatInput) -> dict:
         base_prompt = (
             "固定边界：不要把推测当事实，不要假装记得没有提供的信息。尊重用户自主；提供陪伴和思路整理，不替代专业服务。\n\n"
             + MEMORY_RESPONSE_INSTRUCTIONS
+            + (
+                pending_memory_merge_instructions(pending_normal_memory_suggestions(payload.session_id))
+                if settings["use_memories_in_cloud"] else ""
+            )
         )
         if settings["provider"] == "openai-compatible":
             try:

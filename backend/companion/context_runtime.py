@@ -74,11 +74,20 @@ async def prepare_direct_api_context(
                 compact_settings = {
                     **settings,
                     "temperature": 0.2,
-                    "max_tokens": min(max(int(settings.get("max_tokens", 1200)), 500), 1200),
+                    "max_tokens": min(
+                        int(settings.get("max_tokens", 1200)),
+                        max(64, int(settings.get("max_tokens", 1200)) // 2),
+                        256,
+                    ),
                 }
                 with model_call_context("会话压缩摘要", session_id):
                     updated_summary = await call_model(compact_settings, api_key, summary_request(summary, older))
                 if updated_summary.strip():
+                    if summary.strip() and summary.strip() not in updated_summary:
+                        # A compression model can focus on the newest source
+                        # messages and omit an older fact. Retain the prior
+                        # summary verbatim rather than silently forgetting it.
+                        updated_summary = f"{summary.strip()}\n{updated_summary.strip()}"
                     summary = updated_summary.strip()
                     through_sequence = max(int(item.get("sequence", 0)) for item in older)
                     try:
@@ -90,11 +99,32 @@ async def prepare_direct_api_context(
                 pass
         else:
             recent = pending
-        context = _compose(
-            base_prompt, current_message_id, recent, session_origin, agent_definition, mode, mode_prompt,
-            summary, memories, archived_messages,
-        )
-        context = trim_context_to_budget(context, budget)
+        def compose_and_trim(summary_for_context: str) -> ComposedContext:
+            compacted = _compose(
+                base_prompt, current_message_id, recent, session_origin, agent_definition, mode, mode_prompt,
+                summary_for_context, memories, archived_messages,
+            )
+            return trim_context_to_budget(compacted, budget)
+
+        context = compose_and_trim(summary)
+        if estimate_message_tokens(context.api_messages) > budget and summary:
+            # The saved summary is useful, but it must not make the next user
+            # turn impossible to send. Keep the longest leading portion that
+            # fits alongside the fixed prompt and current message; the full
+            # summary remains persisted for later turns with a larger budget.
+            lower, upper = 0, len(summary)
+            best_summary: str | None = None
+            while lower <= upper:
+                midpoint = (lower + upper) // 2
+                candidate = summary[:midpoint].rstrip()
+                candidate_context = compose_and_trim(candidate)
+                if estimate_message_tokens(candidate_context.api_messages) <= budget:
+                    best_summary = candidate
+                    lower = midpoint + 1
+                else:
+                    upper = midpoint - 1
+            if best_summary is not None:
+                context = compose_and_trim(best_summary)
     if estimate_message_tokens(context.api_messages) > budget:
         raise ContextBudgetExceeded("当前消息和固定上下文已超过模型可用输入空间，请缩短或分段发送。")
     return context

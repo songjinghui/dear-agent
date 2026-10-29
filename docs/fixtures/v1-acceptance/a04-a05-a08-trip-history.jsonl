@@ -1,0 +1,10 @@
+{"type":"archive","format":"personal-conversation-archive","version":"1.1","archive_id":"v1-trip-update-20261028","part_id":"part-001","part_index":1,"part_count":1,"source_platform":"V1 acceptance fixture"}
+{"type":"conversation","id":"trip-update","title":"十一月出行","created_at":"2026-09-28T20:10:00+08:00"}
+{"type":"message","id":"trip-001","conversation_id":"trip-update","sequence":1,"timestamp":"2026-09-28T20:10:00+08:00","speaker":"user","speaker_label":null,"content":"我在看十一月去北疆的行程，最早想定在11月16日出发，待四天。火车票和雪鞋都还没买，羽绒服也只是先收藏了几件。"}
+{"type":"message","id":"trip-002","conversation_id":"trip-update","sequence":2,"timestamp":"2026-09-28T20:12:00+08:00","speaker":"assistant","speaker_label":"拾光（历史样本）","content":"先把时间和交通确认下来，装备可以按停留时间和当地天气慢慢比较。"}
+{"type":"message","id":"trip-003","conversation_id":"trip-update","sequence":3,"timestamp":"2026-10-02T21:35:00+08:00","speaker":"user","speaker_label":null,"content":"今天工作有点忙，晚饭只煮了面。周末如果不下雨，想去河边走走。"}
+{"type":"message","id":"trip-004","conversation_id":"trip-update","sequence":4,"timestamp":"2026-10-02T21:37:00+08:00","speaker":"assistant","speaker_label":"拾光（历史样本）","content":"忙完以后给自己留一点能出门透气的时间，也很好。"}
+{"type":"message","id":"trip-005","conversation_id":"trip-update","sequence":5,"timestamp":"2026-10-08T19:48:00+08:00","speaker":"user","speaker_label":null,"content":"我重新看了假期，把北疆出发日改成11月23日，还是待四天。火车票和雪鞋今天都买好了，羽绒服还没有决定买哪件。"}
+{"type":"message","id":"trip-006","conversation_id":"trip-update","sequence":6,"timestamp":"2026-10-08T19:51:00+08:00","speaker":"assistant","speaker_label":"拾光（历史样本）","content":"现在交通和雪鞋已经落定，接下来主要是羽绒服的选择。11月23日是较新的出发安排。"}
+{"type":"message","id":"trip-007","conversation_id":"trip-update","sequence":7,"timestamp":"2026-10-13T22:06:00+08:00","speaker":"user","speaker_label":null,"content":"今天整理了书架，翻出几本买了很久但还没看完的书。挑了一本薄的放在床边。"}
+{"type":"message","id":"trip-008","conversation_id":"trip-update","sequence":8,"timestamp":"2026-10-13T22:08:00+08:00","speaker":"assistant","speaker_label":"拾光（历史样本）","content":"从薄一点的开始，可能比较容易重新回到阅读里。"}

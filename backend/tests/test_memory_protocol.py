@@ -1,51 +1,23 @@
-import json
-from unittest import TestCase
+import unittest
 
-from companion.memory_protocol import parse_agent_response
+from companion.memory_protocol import parse_agent_response, pending_memory_merge_instructions
 
 
-class MemoryProtocolTests(TestCase):
-    def test_parses_user_reply_and_only_grounded_memory_candidates(self) -> None:
-        raw = json.dumps({
-            "reply": "我可以帮你安排准备计划。",
-            "memory_candidates": [
-                {
-                    "content": "周五前要交项目方案",
-                    "memory_type": "working",
-                    "importance": 4,
-                    "sensitivity": "normal",
-                    "evidence": "周五前要交项目方案",
-                    "rationale": "明确的近期任务",
-                },
-                {
-                    "content": "用户讨厌老板",
-                    "memory_type": "semantic",
-                    "importance": 4,
-                    "sensitivity": "normal",
-                    "evidence": "老板根本不尊重我",
-                    "rationale": "推断出的长期态度",
-                },
-            ],
-        }, ensure_ascii=False)
+class MemoryProtocolTests(unittest.TestCase):
+    def test_truncated_memory_envelope_keeps_the_complete_reply_and_discards_candidates(self) -> None:
+        parsed = parse_agent_response(
+            '{"reply":"可以先看看纸张和页数，再决定去哪里印。","memory_candidates":[{"content":"',
+            "我想做一本照片册。",
+        )
 
-        result = parse_agent_response(raw, "我周五前要交项目方案。")
+        self.assertEqual(parsed["reply"], "可以先看看纸张和页数，再决定去哪里印。")
+        self.assertEqual(parsed["memory_candidates"], [])
 
-        self.assertEqual(result["reply"], "我可以帮你安排准备计划。")
-        self.assertEqual(len(result["memory_candidates"]), 1)
-        self.assertEqual(result["memory_candidates"][0]["content"], "周五前要交项目方案")
+    def test_merge_instruction_combines_one_ongoing_subject_into_a_topic_memory(self) -> None:
+        prompt = pending_memory_merge_instructions([
+            {"id": "candidate-1", "content": "A November trip to northern Xinjiang", "memory_type": "working"},
+        ])
 
-    def test_plain_text_or_invalid_json_remains_a_normal_reply(self) -> None:
-        for raw in ("普通文字回复", '{"reply": 4, "memory_candidates": []}'):
-            with self.subTest(raw=raw):
-                result = parse_agent_response(raw, "用户消息")
-                self.assertEqual(result, {"reply": raw, "memory_candidates": []})
-
-    def test_rejects_unknown_types_and_invalid_sensitivity(self) -> None:
-        raw = json.dumps({
-            "reply": "收到。",
-            "memory_candidates": [
-                {"content": "A", "memory_type": "unknown", "sensitivity": "normal", "evidence": "A"},
-                {"content": "B", "memory_type": "episodic", "sensitivity": "unknown", "evidence": "B"},
-            ],
-        })
-        self.assertEqual(parse_agent_response(raw, "A B")["memory_candidates"], [])
+        self.assertIn("同一持续事项", prompt)
+        self.assertIn("整合为一条主题记忆", prompt)
+        self.assertNotIn("共同主题本身不足以合并", prompt)

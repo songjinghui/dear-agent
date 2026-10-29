@@ -6,6 +6,7 @@ import { useChatSessionSync } from "./useChatSessionSync";
 import { ModelCallLogs } from "./ModelCallLogs";
 import { MemoryPrivacySettings } from "./MemoryPrivacySettings";
 import { MemorySuggestions } from "./MemorySuggestions";
+import { groupMemorySuggestions, type MemorySuggestionGroup } from "./memorySuggestionGroups";
 import { pageFromPathname, pathForPage } from "./routes";
 import { ArchiveCandidateOrganization, OriginalCandidates } from "./ArchiveCandidateOrganization";
 import { emptySettings, formatBytes, labels } from "./constants";
@@ -78,6 +79,10 @@ function App() {
     const conversations = archivePreview?.conversations ?? [];
     return query ? conversations.filter((item) => item.title.toLocaleLowerCase().includes(query)) : conversations;
   }, [archivePreview, archivePreviewQuery]);
+  const pendingMemoryTopicCount = useMemo(
+    () => groupMemorySuggestions(memorySuggestions, {}).length,
+    [memorySuggestions],
+  );
   const chatSync = useChatSessionSync(page === "chat", sessionId, busy, setMessages);
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
@@ -117,10 +122,9 @@ function App() {
   useEffect(() => { endRef.current?.scrollIntoView({ behavior: "smooth" }); }, [messages, busy]);
   useEffect(() => { if (page === "memories") void refreshMemories(memorySearch).catch((e) => setError(e.message)); }, [page, memorySearch, refreshMemories]);
   useEffect(() => {
-    if (!sessionId) return;
-    api<MemorySuggestion[]>(`/api/memory-suggestions?session_id=${encodeURIComponent(sessionId)}`)
+    api<MemorySuggestion[]>("/api/memory-suggestions")
       .then(setMemorySuggestions).catch((e) => setError(e.message));
-  }, [sessionId]);
+  }, []);
   useEffect(() => {
     if (page !== "archives") return;
     void refreshArchiveList(archiveQuery, archiveOffset).catch((e) => setError(e.message));
@@ -163,7 +167,7 @@ function App() {
     setSessionCreationPending(true);
     try {
       const item = await api<Session>("/api/sessions", { method: "POST", body: JSON.stringify({ title: "新的对话" }) });
-      setSessions((current) => [item, ...current.filter((session) => session.id !== item.id)]); setSessionId(item.id); setMessages([]); setMemorySuggestions([]); setPage("chat");
+      setSessions((current) => [item, ...current.filter((session) => session.id !== item.id)]); setSessionId(item.id); setMessages([]); navigate("chat");
     } catch (e) { setError((e as Error).message); }
     finally { creatingSessionRef.current = false; setSessionCreationPending(false); }
   }
@@ -227,19 +231,29 @@ function App() {
       window.setTimeout(() => setNotice(""), 2800);
     } catch (e) { setError((e as Error).message); }
   }
-  async function decideChatMemorySuggestion(item: MemorySuggestion, action: "approve" | "dismiss", edits: Partial<MemorySuggestion> = {}) {
+  async function decideChatMemorySuggestionGroup(group: MemorySuggestionGroup, action: "approve" | "dismiss", edits: Partial<MemorySuggestion> = {}) {
+    const suggestionIds = group.items.map((item) => item.id);
     try {
       if (action === "approve") {
-        await api<Memory>(`/api/memory-suggestions/${encodeURIComponent(item.id)}/approve`, {
-          method: "POST", body: JSON.stringify(edits),
+        await api<Memory>("/api/memory-suggestion-groups/approve", {
+          method: "POST", body: JSON.stringify({
+            suggestion_ids: suggestionIds,
+            content: edits.content ?? group.content,
+            memory_type: edits.memory_type ?? group.memoryType,
+            importance: edits.importance ?? group.importance,
+            sensitivity: edits.sensitivity ?? group.sensitivity,
+            expires_at: edits.expires_at ?? null,
+          }),
         });
         await refreshMemories(memorySearch);
         setNotice("已确认并保存到长期记忆");
       } else {
-        await api(`/api/memory-suggestions/${encodeURIComponent(item.id)}`, { method: "DELETE" });
-        setNotice("已忽略这条记忆建议");
+        await api("/api/memory-suggestion-groups/dismiss", {
+          method: "POST", body: JSON.stringify({ suggestion_ids: suggestionIds }),
+        });
+        setNotice("已忽略这组记忆建议");
       }
-      setMemorySuggestions((current) => current.filter((suggestion) => suggestion.id !== item.id));
+      setMemorySuggestions((current) => current.filter((suggestion) => !suggestionIds.includes(suggestion.id)));
       window.setTimeout(() => setNotice(""), 2800);
     } catch (e) { setError((e as Error).message); }
   }
@@ -247,7 +261,7 @@ function App() {
     try {
       await api<Session>(`/api/archives/sessions/${encodeURIComponent(item.id)}/continue`, { method: "POST" });
       await refreshSessions();
-      setSessionId(item.id); setPage("chat"); setSelectedArchive(null); setError("");
+      setSessionId(item.id); navigate("chat"); setSelectedArchive(null); setError("");
     } catch (e) { setError((e as Error).message); }
   }
   async function deleteArchive(item: ArchiveImport) {
@@ -377,7 +391,7 @@ function App() {
           if (!line) return;
           const item = JSON.parse(line.slice(6)) as { type: string; content?: string; message?: string; user_message?: Message; assistant_message?: Message; memory_suggestions?: MemorySuggestion[] };
           if (item.type === "delta" && item.content) {
-            setMessages((current) => current.map((message) => message.id === optimisticAssistant?.id
+            setMessages((current) => current.map((message) => message.id === optimisticAssistant.id
               ? { ...message, content: message.content + item.content }
               : message));
           } else if (item.type === "done" && item.user_message && item.assistant_message) {
@@ -478,25 +492,25 @@ function App() {
   return <div className="app-shell">
     <aside className="sidebar">
       <div className="brand"><span className="brand-mark">拾</span><div><strong>拾光</strong><small>个人生活 Agent</small></div></div>
-      <button className={`nav-item ${page === "chat" ? "active" : ""}`} onClick={() => setPage("chat")}><span>◌</span> 对话</button>
-      <button className={`nav-item ${page === "archives" ? "active" : ""}`} onClick={() => setPage("archives")}><span>⌕</span> 历史档案 <span className="nav-count">{archiveTotal || ""}</span></button>
-      <button className={`nav-item ${page === "memories" ? "active" : ""}`} onClick={() => setPage("memories")}><span>✳</span> 记忆 <span className="nav-count">{memories.length || ""}</span></button>
-      <button className={`nav-item ${page === "settings" ? "active" : ""}`} onClick={() => setPage("settings")}><span>⚙</span> 模型设置</button>
+      <button className={`nav-item ${page === "chat" ? "active" : ""}`} onClick={() => navigate("chat")}><span>◌</span> 对话</button>
+      <button className={`nav-item ${page === "archives" ? "active" : ""}`} onClick={() => navigate("archives")}><span>⌕</span> 历史档案 <span className="nav-count">{archiveTotal || ""}</span></button>
+      <button className={`nav-item ${page === "memories" ? "active" : ""}`} onClick={() => navigate("memories")}><span>✳</span> 记忆 <span className="nav-count">{memories.length || ""}</span>{pendingMemoryTopicCount > 0 && <span className="nav-count nav-pending-count" title={`${pendingMemoryTopicCount} 个待确认主题`} aria-label={`${pendingMemoryTopicCount} 个待确认主题`}>{pendingMemoryTopicCount}</span>}</button>
+      <button className={`nav-item ${page === "settings" ? "active" : ""}`} onClick={() => navigate("settings")}><span>⚙</span> 模型设置</button>
       <div className="sidebar-divider" />
       <div className="section-heading"><span>最近对话</span><button aria-label="新建对话" title="新建对话" onClick={newSession} disabled={sessionCreationPending}>＋</button></div>
-      <div className="session-list">{sessions.map((item) => <button key={item.id} className={`session-item ${sessionId === item.id && page === "chat" ? "selected" : ""}`} onClick={() => { setSessionId(item.id); setPage("chat"); if (sessionId === item.id && page === "chat") void chatSync.refresh().catch((e) => setError(e.message)); }}><span className="session-dot" />{item.title}{item.origin === "continued" && <small className="session-origin">续聊</small>}</button>)}</div>
+      <div className="session-list">{sessions.map((item) => <button key={item.id} className={`session-item ${sessionId === item.id && page === "chat" ? "selected" : ""}`} onClick={() => { setSessionId(item.id); navigate("chat"); if (sessionId === item.id && page === "chat") void chatSync.refresh().catch((e) => setError(e.message)); }}><span className="session-dot" />{item.title}{item.origin === "continued" && <small className="session-origin">续聊</small>}</button>)}</div>
       <div className="sidebar-bottom"><span className="local-dot" />仅在本机运行 <span className="bottom-lock">⌑</span></div>
     </aside>
     <main className="main-area">
       <header className="topbar"><div className="breadcrumb">{page === "chat" ? "日常陪伴" : page === "archives" ? "历史档案" : page === "memories" ? "我的记忆" : page === "model-logs" ? "模型调用记录" : "偏好设置"}</div><div className="top-actions"><div className="theme-picker-wrap" onBlur={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setShowThemeMenu(false); }}><button className="theme-trigger" aria-expanded={showThemeMenu} onClick={() => setShowThemeMenu((open) => !open)}><span className={`theme-swatch swatch-${theme}`} />外观<span className="theme-chevron">⌄</span></button>{showThemeMenu && <div className="theme-menu" role="menu"><div className="theme-menu-title">页面风格</div>{([{ id: "warm", label: "暖纸", detail: "柔和、安静" }, { id: "mist", label: "浅青", detail: "清爽、轻盈" }, { id: "night", label: "夜间", detail: "低亮度、舒适" }] as const).map((option) => <button key={option.id} role="menuitemradio" aria-checked={theme === option.id} className={`theme-option ${theme === option.id ? "selected" : ""}`} onClick={() => { setTheme(option.id); setShowThemeMenu(false); }}><span className={`theme-swatch swatch-${option.id}`} /><span className="theme-option-copy"><strong>{option.label}</strong><small>{option.detail}</small></span><span className="theme-check">{theme === option.id ? "✓" : ""}</span></button>)}</div>}</div><div className="top-status"><span className="local-dot" /> 本机模式</div></div></header>
       {error && <div className="toast error-toast"><span>!</span>{error}<button onClick={() => setError("")}>×</button></div>}
       {notice && <div className="toast success-toast"><span>✓</span>{notice}<button onClick={() => setNotice("")}>×</button></div>}
+      {page === "memories" && memorySuggestions.length > 0 && <section className="memory-suggestions-inbox"><MemorySuggestions items={memorySuggestions} sessionTitles={Object.fromEntries(sessions.map((session) => [session.id, session.title]))} onApproveGroup={(group, edits) => void decideChatMemorySuggestionGroup(group, "approve", edits)} onDismissGroup={(group) => void decideChatMemorySuggestionGroup(group, "dismiss")} /></section>}
       {page === "chat" && <section className="chat-page">
         <div className="chat-heading"><div><span className="eyebrow">PERSONAL COMPANION</span><h1>今天，想从哪里聊起？</h1><p>{sessions.find((item) => item.id === sessionId)?.origin === "continued" ? "正在接续一段导入的历史会话；这里展示最近 100 条，完整记录可在历史档案中查看。" : "我会认真听，也会尊重你希望保留的边界。"}</p></div><button className="new-chat-button" onClick={newSession} disabled={sessionCreationPending}>＋ <span>新对话</span></button></div>
         {chatSync.status === "processing" && <div className="chat-sync-note">正在等待模型回复；离开页面或刷新后会自动同步。</div>}
         {chatSync.status === "interrupted" && <div className="chat-sync-note interrupted">{chatSync.statusError || "上一条消息没有收到回复。你的消息仍保留在会话中。"}</div>}
         {messages.length === 0 ? <div className="welcome-card"><div className="sun-icon">☼</div><h2>这里是你的私人空间</h2><p>你可以聊聊今天，也可以一起整理一个念头。<br />发现可能有帮助的内容时，我会先征求你的确认。</p><div className="prompt-chips"><button onClick={() => setDraft("今天有件事想和你说说。")}>聊聊今天发生的事 <span>↗</span></button><button onClick={() => setDraft("我想理一理最近的感受。")}>整理最近的感受 <span>↗</span></button></div></div> : <div className="message-list">{messages.map((message) => <article key={message.id} className={`message ${message.role}`}><div className="avatar">{message.role === "assistant" ? "拾" : "我"}</div><div className="message-body"><div className="message-label">{message.origin === "imported" ? (message.speaker_label || message.speaker || message.role) : message.role === "assistant" ? "拾光" : "你"}{message.origin === "imported" && <small className="message-origin">历史导入</small>}{message.origin === "continued" && <small className="message-origin">续聊</small>}</div>{message.role === "assistant" ? <AssistantReply content={message.content} waiting={message.id === streamingMessageId && !message.content} streaming={message.id === streamingMessageId && Boolean(message.content)} revealing={message.id === animatedMessageId} onRevealComplete={() => finishAssistantReveal(message.id)} /> : <div className="message-text">{message.content}</div>}<ImageAttachments items={message.attachments} /></div></article>)}<div ref={endRef} /></div>}
-        <MemorySuggestions items={memorySuggestions} onApprove={(item, edits) => void decideChatMemorySuggestion(item, "approve", edits)} onDismiss={(item) => void decideChatMemorySuggestion(item, "dismiss")} />
         <div className="composer-wrap"><div className="mode-switch"><div className="mode-switch-copy"><strong>{activeMode === "chat" ? "聊天模式" : "管家模式"}</strong><small>{activeMode === "chat" ? "倾听交流，按需给建议" : "规划安排，评估风险并跟进"}</small></div><div className="mode-switch-options" role="group" aria-label="对话模式"><button type="button" className={activeMode === "chat" ? "selected" : ""} aria-pressed={activeMode === "chat"} onClick={() => void changeSessionMode("chat")}>聊天</button><button type="button" className={activeMode === "manager" ? "selected" : ""} aria-pressed={activeMode === "manager"} onClick={() => void changeSessionMode("manager")}>管家</button></div></div><form className="composer" onSubmit={sendMessage}><textarea value={draft} onChange={(e) => setDraft(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); e.currentTarget.form?.requestSubmit(); } }} placeholder="写下你此刻想说的话…" rows={2} /><div className="composer-footer"><span><kbd>Enter</kbd> 发送 · <kbd>Shift + Enter</kbd> 换行</span><button className="send-button" disabled={!draft.trim() || busy} aria-label="发送">↑</button></div></form><div className="privacy-hint">{settings.provider !== "openai-compatible" ? `消息将由本机 ${settings.providers.find((provider) => provider.id === settings.provider)?.name || "CLI Agent"} 处理` : settings.has_api_key ? "消息将发送至你配置的模型服务" : "先在模型设置中配置服务，或直接说「记住这个：…」保存一条记忆"}{settings.use_memories_in_cloud && (settings.has_api_key || settings.has_codex_login) ? " · 相关记忆已开启注入" : ""}{settings.use_archive_history ? " · 已开启历史档案检索，相关原文会附加到模型请求" : ""}</div></div>
       </section>}
       {page === "archives" && <section className="content-page archive-page"><div className="page-title-row"><div><span className="eyebrow">PORTABLE CONVERSATION HISTORY</span><h1>历史档案</h1><p>导入标准会话档案，在本机搜索和回看原始消息。</p></div><div className="archive-links"><a href="/api/archives/format">格式说明</a><a href="/api/archives/example">示例文件</a><a href="/api/archives/conversion-prompt">AI 转换指令</a></div></div>

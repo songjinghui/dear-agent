@@ -1,22 +1,24 @@
 {
   "name": "personal-companion-agent-ui",
   "private": true,
-  "version": "0.1.0",
+  "version": "1.0.0",
   "type": "module",
   "scripts": {
     "dev": "vite --host 127.0.0.1",
     "build": "tsc --noEmit && vite build",
-    "test": "node --test tests/*.test.mjs"
+    "test": "node --test tests/*.test.mjs",
+    "test:e2e": "npm run build && playwright test"
   },
   "dependencies": {
     "react": "latest",
     "react-dom": "latest"
   },
   "devDependencies": {
-    "@vitejs/plugin-react": "latest",
+    "@playwright/test": "^1.64.1",
     "@types/react": "latest",
     "@types/react-dom": "latest",
-    "vite": "latest",
-    "typescript": "latest"
+    "@vitejs/plugin-react": "latest",
+    "typescript": "latest",
+    "vite": "latest"
   }
 }
